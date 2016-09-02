@@ -35,7 +35,7 @@ const OSSymbol *gIOFireWireAVCSubUnitCount[kAVCNumSubUnitTypes];
 
 OSDefineMetaClass(IOFireWireAVCNub, IOService)
 OSDefineAbstractStructors(IOFireWireAVCNub, IOService)
-OSMetaClassDefineReservedUnused(IOFireWireAVCNub, 0);
+//OSMetaClassDefineReservedUnused(IOFireWireAVCNub, 0);
 OSMetaClassDefineReservedUnused(IOFireWireAVCNub, 1);
 OSMetaClassDefineReservedUnused(IOFireWireAVCNub, 2);
 OSMetaClassDefineReservedUnused(IOFireWireAVCNub, 3);
@@ -72,7 +72,7 @@ void IOFireWireAVCUnit::updateSubUnits(bool firstTime)
     UInt32 size;
     UInt8 cmd[8],response[8];
     OSObject *prop;
-
+    bool hasFCP = true;
 // Get SubUnit info
     cmd[kAVCCommandResponse] = kAVCStatusInquiryCommand;
     cmd[kAVCAddress] = kAVCUnitAddress;
@@ -85,7 +85,11 @@ void IOFireWireAVCUnit::updateSubUnits(bool firstTime)
     
     if(res != kIOReturnSuccess || response[kAVCCommandResponse] != kAVCImplementedStatus) {
         if(firstTime) {
-            // Stupid convertor box doesn't do AVC, make it look like a camcorder.
+            // Sony convertor box doesn't do AVC, make it look like a camcorder.
+            // Panasonic NV-C5 doesn't support SubunitInfo query but does support VCR commands
+            if(res != kIOReturnSuccess)
+                hasFCP = false;
+            
             response[kAVCOperand2] = 0x20;	// One VCR
             response[kAVCOperand3] = 0xff;
             response[kAVCOperand4] = 0xff;
@@ -94,9 +98,15 @@ void IOFireWireAVCUnit::updateSubUnits(bool firstTime)
         else
             return;	// No update necessary
     }
+
+    if(firstTime)
+        setProperty("supportsFCP", hasFCP);
     
     // Zero count of subunits before updating with new counts
     bzero(fSubUnitCount, sizeof(fSubUnitCount));
+    for(int i=0; i<kAVCNumSubUnitTypes; i++) {
+        removeProperty(gIOFireWireAVCSubUnitCount[i]);
+    }
     
     for(int i=0; i<4; i++) {
         UInt8 val = response[kAVCOperand1+i];
@@ -106,11 +116,7 @@ void IOFireWireAVCUnit::updateSubUnits(bool firstTime)
             num = (val & 0x7)+1;
             fSubUnitCount[type] = num;
             //IOLog("Subunit type %x, num %d\n", type, num);
-            prop = OSNumber::withNumber(num, 8);
-            if(prop) {
-                setProperty(gIOFireWireAVCSubUnitCount[type], prop);
-                prop->release();
-            }
+            setProperty(gIOFireWireAVCSubUnitCount[type]->getCStringNoCopy(), num, 8);
             
             // Create sub unit nub if it doesn't exist
             IOFireWireAVCSubUnit *sub = NULL;
@@ -150,6 +156,8 @@ void IOFireWireAVCUnit::updateSubUnits(bool firstTime)
                     break;
                 if (!sub->attach(this))	
                     break;
+                sub->setProperty("supportsFCP", hasFCP);
+
                 sub->registerService();
                 
             } while (0);
@@ -222,11 +230,18 @@ bool IOFireWireAVCUnit::start(IOService *provider)
         IOLog("IOAVCUnit::start avcLock failed\n");
         return false;
     }
-        
+    
+    cmdLock = IOLockAlloc();
+    if (cmdLock == NULL) {
+        IOLog("IOAVCUnit::start avcLock failed\n");
+        return false;
+    }
+    
 // Get Unit type
     IOReturn res;
     UInt32 size;
     UInt8 cmd[8],response[8];
+
     cmd[kAVCCommandResponse] = kAVCStatusInquiryCommand;
     cmd[kAVCAddress] = kAVCUnitAddress;
     cmd[kAVCOpcode] = kAVCUnitInfoOpcode;
@@ -253,11 +268,8 @@ bool IOFireWireAVCUnit::start(IOService *provider)
     prop = provider->getProperty(gFireWireProduct_Name);
     if(prop)
         setProperty(gFireWireProduct_Name, prop);
-    prop = OSNumber::withNumber(type, 32);
-    if(prop) {
-        setProperty(gIOFireWireAVCUnitType, prop);
-        prop->release();
-    }
+    
+    setProperty("Unit_Type", type, 32);
     
 	// mark ourselves as started, this allows us to service resumed messages
 	// resumed messages after this point should be safe.
@@ -329,7 +341,7 @@ IOReturn IOFireWireAVCUnit::AVCCommand(const UInt8 * in, UInt32 len, UInt8 * out
     IOReturn res;
     IOFireWireAVCCommand *cmd;
     if(len == 0 || len > 512) {
-        IOLog("Loopy AVCCmd, len %d, respLen %d\n", len, *size);
+        IOLog("Loopy AVCCmd, len %ld, respLen %ld\n", len, *size);
         return kIOReturnBadArgument;
     }
     cmd = IOFireWireAVCCommand::withNub(fDevice, in, len, out, size);
@@ -345,7 +357,9 @@ IOReturn IOFireWireAVCUnit::AVCCommand(const UInt8 * in, UInt32 len, UInt8 * out
         //IOLog("AVCCommand returning 0x%x\n", res);
         //IOLog("command %x\n", *(UInt32 *)in);
     }
+    IOTakeLock(cmdLock);
     fCommand = NULL;
+    IOUnlock(cmdLock);
     cmd->release();
     IOUnlock(avcLock);
 
@@ -357,7 +371,7 @@ IOReturn IOFireWireAVCUnit::AVCCommandInGeneration(UInt32 generation, const UInt
     IOReturn res;
     IOFireWireAVCCommand *cmd;
     if(len == 0 || len > 512) {
-        IOLog("Loopy AVCCmd, len %d, respLen %d\n", len, *size);
+        IOLog("Loopy AVCCmd, len %ld, respLen %ld\n", len, *size);
         return kIOReturnBadArgument;
     }
     cmd = IOFireWireAVCCommand::withNub(fDevice, generation, in, len, out, size);
@@ -373,7 +387,9 @@ IOReturn IOFireWireAVCUnit::AVCCommandInGeneration(UInt32 generation, const UInt
         //IOLog("AVCCommand returning 0x%x\n", res);
         //IOLog("command %x\n", *(UInt32 *)in);
     }
+    IOTakeLock(cmdLock);
     fCommand = NULL;
+    IOUnlock(cmdLock);
     cmd->release();
     IOUnlock(avcLock);
 
@@ -415,6 +431,16 @@ IOReturn IOFireWireAVCUnit::message(UInt32 type, IOService *provider, void *argu
     messageClients(type);
     
     return kIOReturnSuccess;
+}
+
+IOReturn IOFireWireAVCUnit::updateAVCCommandTimeout()
+{
+    IOTakeLock(cmdLock);
+    if(fCommand != NULL)
+        fCommand->resetInterimTimeout();
+    IOUnlock(cmdLock);
+
+    return kIOReturnSuccess;    
 }
 
 /* -------------------------------------------- AVC SubUnit -------------------------------------------- */
@@ -490,6 +516,11 @@ IOReturn IOFireWireAVCSubUnit::AVCCommand(const UInt8 * in, UInt32 len, UInt8 * 
 IOReturn IOFireWireAVCSubUnit::AVCCommandInGeneration(UInt32 generation, const UInt8 * in, UInt32 len, UInt8 * out, UInt32 *size)
 {
     return fAVCUnit->AVCCommandInGeneration(generation, in, len, out, size);
+}
+
+IOReturn IOFireWireAVCSubUnit::updateAVCCommandTimeout()
+{
+    return fAVCUnit->updateAVCCommandTimeout();
 }
 
 //
