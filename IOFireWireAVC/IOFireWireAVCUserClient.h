@@ -2,24 +2,21 @@
  * Copyright (c) 1998-2001 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
- * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
- * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ *
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
+ *
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
- * 
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
+ *
  * @APPLE_LICENSE_HEADER_END@
  */
 
@@ -33,6 +30,8 @@
 #include <IOKit/avc/IOFireWireAVCUnit.h>
 #include <IOKit/avc/IOFireWireAVCUserClientCommon.h>
 
+class IOFireWireAVCUserClient;
+
 // A little class to put into the connections set
 class IOFireWireAVCConnection : public OSObject
 {
@@ -44,6 +43,18 @@ public:
 	UInt32 fChannel;
 };
 
+// A wrapper class for async AVC commands created by this user client
+class IOFireWireAVCUserClientAsyncCommand : public OSObject
+{
+    OSDeclareDefaultStructors(IOFireWireAVCUserClientAsyncCommand)
+public:
+	IOFireWireAVCAsynchronousCommand *pAsyncCommand;
+	IOMemoryDescriptor *fMem;
+	IOFireWireAVCUserClient *pUserClient;
+	UInt32 commandIdentifierHandle;
+};
+
+
 class IOFireWireAVCUserClient : public IOUserClient
 {
     OSDeclareDefaultStructors(IOFireWireAVCUserClient)
@@ -51,7 +62,7 @@ class IOFireWireAVCUserClient : public IOUserClient
 protected:
 
     static IOExternalMethod 		sMethods[kIOFWAVCUserClientNumCommands];
-    //static IOExternalAsyncMethod 	sAsyncMethods[kIOFWSBP2UserClientNumAsyncCommands];
+    static IOExternalAsyncMethod 	sAsyncMethods[kIOFWAVCUserClientNumAsyncCommands];
 
     bool					fOpened;
 	bool					fStarted;
@@ -59,6 +70,16 @@ protected:
 	
     IOFireWireAVCNub *		fUnit;
 	OSArray *				fConnections;
+
+	IOLock *				fAsyncAVCCmdLock;
+	OSArray *				fUCAsyncCommands;
+	UInt32					fNextAVCAsyncCommandHandle;
+    OSAsyncReference		fAsyncAVCCmdCallbackInfo;
+	
+#ifdef kUseAsyncAVCCommandForBlockingAVCCommand
+	IOLock *avcCmdLock;
+	IOFireWireAVCAsynchronousCommand *pCommandObject;
+#endif
     
     static void remakeConnections(void *arg);
     virtual IOExternalMethod * getTargetAndMethodForIndex(IOService **target, UInt32 index);
@@ -66,13 +87,11 @@ protected:
     virtual IOReturn IOFireWireAVCUserClient::updateP2PCount(UInt32 addr, SInt32 inc, bool failOnBusReset, UInt32 chan, IOFWSpeed speed);
     virtual IOReturn makeConnection(UInt32 addr, UInt32 chan, IOFWSpeed speed);
     virtual void breakConnection(UInt32 addr);
+	virtual IOFireWireAVCUserClientAsyncCommand *FindUCAsyncCommandWithHandle(UInt32 commandHandle);
     
 public:
-
-    static IOFireWireAVCUserClient* withTask( task_t owningTask );
-
-    virtual bool init( OSDictionary * dictionary = 0 );
-    virtual void free();
+	virtual bool initWithTask(task_t owningTask, void * securityToken, UInt32 type,OSDictionary * properties);
+	virtual void free();
     virtual bool start( IOService * provider );
     virtual void stop( IOService * provider );
 
@@ -95,6 +114,15 @@ public:
     virtual IOReturn breakP2PInputConnection( UInt32 plugNo, void * = 0, void * = 0, void * = 0, void * = 0, void * = 0);
     virtual IOReturn makeP2POutputConnection( UInt32 plugNo, UInt32 chan, IOFWSpeed speed, void * = 0, void * = 0, void * = 0);
     virtual IOReturn breakP2POutputConnection( UInt32 plugNo, void * = 0, void * = 0, void * = 0, void * = 0, void * = 0);
+	
+    virtual IOReturn installUserLibAsyncAVCCommandCallback(OSAsyncReference asyncRef, void *userRefcon, UInt32 *returnParam);
+	
+	virtual IOReturn CreateAVCAsyncCommand(UInt8 * cmd, UInt8 * asyncAVCCommandHandle, UInt32 len, UInt32 *refSize);
+	virtual IOReturn SubmitAVCAsyncCommand(UInt32 commandHandle);
+	virtual IOReturn CancelAVCAsyncCommand(UInt32 commandHandle);
+	virtual IOReturn ReleaseAVCAsyncCommand(UInt32 commandHandle);
+	virtual void HandleUCAsyncCommandCallback(IOFireWireAVCUserClientAsyncCommand *pUCAsyncCommand);
+	virtual IOReturn ReinitAVCAsyncCommand(UInt32 commandHandle, const UInt8 *pCommandBytes, UInt32 len);
 };
 
 #endif // _IOKIT_IOFIREWIREAVCUSERCLIENT_H
